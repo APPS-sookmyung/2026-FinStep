@@ -13,6 +13,10 @@ LABELS = {
 
 def rule_analysis(answer):
     # The fallback only covers explicit expressions. The LLM handles broader phrasing.
+    # Route source attribution and explicit retractions to semantic analysis;
+    # a local keyword match must not promote a supplied link to an official check.
+    if re.search(r'상대방.{0,20}(?:링크|번호|연락처|등록증)|(?:알려준|보내준|제공한).{0,12}(?:링크|번호|연락처)|려\s*했|생각했', answer):
+        return {"actions": [], "ambiguous": True, "reliable": False}
     if re.search(r'[?？]|인가요|할까요|라고\s*(말|했)|고\s*했다|[“”‘’"\']', answer):
         return {"actions": [], "ambiguous": True, "reliable": False}
     if re.search(r'판정해|분류해|규칙을|프롬프트|안전으로', answer):
@@ -38,7 +42,8 @@ def rule_analysis(answer):
         for match in re.finditer(pattern, answer):
             evidence = match.group()
             prefix = answer[max(0, match.start() - 3):match.start()]
-            negated = bool(re.search(r'않|안\s|거절', evidence) or re.search(r'안\s*$', prefix))
+            negated = bool(re.search(r'않|안\s', evidence) or re.search(r'안\s*$', prefix)
+                           or (kind in RISK_TYPES and '거절' in evidence))
             completed = bool(re.search(r'했|보냈|줬', evidence))
             historical = completed and bool(re.search(r'이미|전에|앞서|지만', answer))
             actions.append({"type": kind, "evidence": evidence,
@@ -63,6 +68,30 @@ def decide(analysis):
             or (a['type'] in RISK_TYPES and a['status'] == 'negated')]
     branch = 'unclear' if analysis['ambiguous'] else 'risky' if risk else 'safe' if safe else 'unclear'
     return branch, any(a['type'] == 'end_contact' and a['status'] != 'negated' for a in active)
+
+
+def resolve_analysis(answer, model_analysis):
+    """Shared model/rule reconciliation used by sessions and live evaluation.
+
+    None means analysis is unavailable, not that the user's answer is unsafe.
+    """
+    rules = rule_analysis(answer)
+    if not model_analysis['llm_available']:
+        return rules if rules['reliable'] else None
+    if not rules['reliable']:
+        return model_analysis
+    rule_branch, _ = decide(rules)
+    model_branch, _ = decide(model_analysis)
+    conflicts = [
+        action for action in model_analysis['actions']
+        if any(rule['type'] == action['type'] and rule['status'] != action['status']
+               and (rule['evidence'] in action['evidence'] or action['evidence'] in rule['evidence'])
+               for rule in rules['actions'])
+    ]
+    if rule_branch != model_branch or conflicts:
+        return {'actions': [a for a in model_analysis['actions'] if a not in conflicts],
+                'ambiguous': True}
+    return model_analysis
 
 
 def labels(actions, risky):

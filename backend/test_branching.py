@@ -13,7 +13,7 @@ from fastapi.testclient import TestClient
 from routers.multi_stage import router
 from services.auth_service import optional_user
 from services import multi_stage_service as svc, llm_service as llm
-from services.branch_analysis import rule_analysis, decide
+from services.branch_analysis import rule_analysis, decide, resolve_analysis
 
 
 def action(kind, evidence, status='planned', historical=False):
@@ -110,7 +110,7 @@ class BranchTests(unittest.TestCase):
             result = self.submit(sid, analysis(ambiguous=True), '잘 모르겠어요')
             self.assertEqual(result['completed_stage_count'], 0)
             self.assertEqual(result['stage'], 1)
-            self.assertEqual(result['total_score'], 0)
+            self.assertIsNone(result['total_score'])
             self.assertEqual(result['is_finished'], attempt == 2)
         final = svc.get_session_result(sid)
         self.assertEqual(final['risk_level'], 'unknown')
@@ -176,6 +176,33 @@ class BranchTests(unittest.TestCase):
 
 
 class RulesTests(unittest.TestCase):
+    def test_refusal_is_positive_protection_not_negated_stop(self):
+        answer = '이미 송금했지만 추가 송금은 거절하고 전화를 끊는다.'
+        extracted = rule_analysis(answer)
+        stops = [a for a in extracted['actions'] if a['type'] == 'stop_or_delay']
+        self.assertEqual(stops[0]['status'], 'planned')
+        payload = analysis(action('transfer_money', '이미 송금했지만', 'completed', True),
+                           action('stop_or_delay', '추가 송금은 거절하고'),
+                           action('end_contact', '전화를 끊는다'))
+        self.assertEqual(decide(resolve_analysis(answer, payload)), ('safe', True))
+
+    def test_attributed_links_and_retractions_require_semantic_analysis(self):
+        for answer in ['상대방이 준 링크에서 공식 기관에 확인한다',
+                       '상대방이 알려준 번호로 공식 기관에 확인한다',
+                       '송금하려 했지만 아직 보내지 않았고 송금하지 않겠다']:
+            self.assertFalse(rule_analysis(answer)['reliable'])
+            self.assertIsNone(resolve_analysis(answer, {'llm_available': False}))
+
+    def test_explicit_retraction_is_not_overridden_by_keyword_rule(self):
+        payload = analysis(action('transfer_money', '송금하지 않겠다', 'negated'))
+        resolved = resolve_analysis('송금하려 했지만 아직 보내지 않았고 송금하지 않겠다', payload)
+        self.assertEqual(decide(resolved), ('safe', False))
+
+    def test_official_link_keyword_cannot_overrule_semantic_source(self):
+        payload = analysis(ambiguous=True)
+        answer = '상대방이 준 링크에서 공식 기관에 확인한다'
+        self.assertEqual(decide(resolve_analysis(answer, payload)), ('unclear', False))
+
     def test_explicit_examples(self):
         cases = {
             '송금하지 않고 공식 기관에 확인한다': 'safe',
@@ -201,6 +228,11 @@ class RulesTests(unittest.TestCase):
 
 
 class LLMTests(unittest.TestCase):
+    def setUp(self):
+        provider_patch = patch.object(llm, 'provider', 'gemini')
+        provider_patch.start()
+        self.addCleanup(provider_patch.stop)
+
     def call_analysis(self, raw):
         client = SimpleNamespace(models=SimpleNamespace(generate_content=lambda **kw: SimpleNamespace(text=raw)))
         with patch.object(llm, 'client', client), patch.object(llm, 'model', 'mock'):

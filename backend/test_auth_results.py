@@ -187,12 +187,18 @@ class AuthResultsTests(unittest.TestCase):
         listing = self.a.get('/api/results').json()
         self.assertEqual(len(listing['items']), 1)
         self.assertFalse(listing['has_more'])
+        self.assertEqual(listing['items'][0]['score'], 90)
+        self.assertEqual(listing['items'][0]['scoring_version'], 'behavior-v1')
         self.assertEqual(self.b.get('/api/results').json()['items'], [])
         self.assertEqual(self.b.get(f'/api/results/{result_id}').status_code, 404)
         self.assertEqual(self.b.post('/api/results', json={'session_id': sid}).status_code, 404)
         self.assertEqual(self.b.get(f'/api/multi-stage/sessions/{sid}/result').status_code, 404)
         report = self.a.get(f'/api/results/{result_id}').json()['result']
         self.assertNotEqual(report['score'], 9999)
+        self.assertEqual(report['score'], 90)
+        self.assertEqual(report['scoring_version'], 'behavior-v1')
+        self.assertEqual(report['score_breakdown']['final_score'], 90)
+        self.assertEqual(report['score_breakdown']['safe_categories'][0]['action']['evidence'], '전화를 끊는다')
         self.assertEqual(report['ending_type'], 'safe_exit')
         self.assertTrue(report['conversation_history'])
 
@@ -230,6 +236,8 @@ class AuthResultsTests(unittest.TestCase):
         self.assertTrue(first['has_more'])
         self.assertFalse(second['has_more'])
         self.assertEqual(len(first['items']) + len(second['items']), 3)
+        self.assertIsNone(first['items'][0]['score'])
+        self.assertEqual(first['items'][0]['scoring_version'], 'legacy-v0')
         self.assertEqual(self.a.get('/api/results?limit=101').status_code, 422)
 
 

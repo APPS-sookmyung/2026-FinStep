@@ -3,9 +3,10 @@ from uuid import uuid4
 
 from data.scenarios import MULTI_STAGE_SCENARIOS
 from data.branches import BRANCHES, ENDINGS, next_dialogue
-from services.branch_analysis import RISK_TYPES, decide, labels, rule_analysis
+from services.branch_analysis import RISK_TYPES, decide, labels, resolve_analysis
 from services.llm_service import analyze_answer_with_llm, generate_next_response
 from services.simulator_service import is_negated
+from services.scoring import SCORING_VERSION, calculate_score, clamp_score
 
 from services.session_store import create_session_snapshot, get_session, load_session, save_session
 CLARIFICATION = '이 상황에서 실제로 어떻게 행동할지 적어주세요. 돈이나 정보를 제공할지, 확인하거나 대화를 중단할지 구체적으로 알려주세요.'
@@ -24,7 +25,8 @@ def create_session(scenario_id, owner=None):
     session = {
         'owner': owner,
         'session_id': sid, 'scenario_id': scenario_id, 'current_stage': 1,
-        'total_score': 0, 'stage_results': [], 'action_history': [],
+        'scoring_version': SCORING_VERSION,
+        'total_score': None, 'stage_results': [], 'action_history': [],
         'conversation_history': [], 'clarification_count': 0,
         'branch': None, 'ending_type': None, 'is_finished': False,
         'description': data['questions'][0], 'question': data['questions'][0],
@@ -50,7 +52,11 @@ def _response(session, status='advanced'):
         'scenario_title': scenario['title'], 'stage': stage['stage'],
         'stage_title': stage['title'], 'description': session['description'],
         'question': session['question'], 'messages': deepcopy(session['messages']),
-        'total_stages': scenario['total_stages'], 'total_score': session['total_score'],
+        'total_stages': scenario['total_stages'],
+        'total_score': (session['total_score'] if session.get('scoring_version') == SCORING_VERSION
+                        else clamp_score(session['total_score']) if session['is_finished']
+                        else session['total_score']),
+        'scoring_version': session.get('scoring_version', 'legacy-v0'),
         'branch': session['branch'], 'status': status,
         'completed_stage_count': len(session['stage_results']),
         'ending_type': session['ending_type'], 'is_finished': session['is_finished'],
@@ -97,27 +103,11 @@ def _submit(session, answer):
         situation=session['description'], answer=answer,
         conversation_history=session['conversation_history'],
     )
-    rules = rule_analysis(answer)
-    if not analysis['llm_available']:
-        if not rules['reliable']:
-            response = _response(session, 'analysis_unavailable')
-            response['messages'] = [{'speaker': '진행 안내', 'message': '지금은 답변을 분석할 수 없습니다. 잠시 후 다시 제출해 주세요.'}]
-            return response
-        analysis = rules
-    elif rules['reliable']:
-        # A clear local risky action must not be canceled by an LLM's safe-only extraction.
-        rule_branch, _ = decide(rules)
-        model_branch, _ = decide(analysis)
-        conflicting_actions = [
-            action for action in analysis['actions']
-            if any(rule['type'] == action['type'] and rule['status'] != action['status']
-                   and (rule['evidence'] in action['evidence'] or action['evidence'] in rule['evidence'])
-                   for rule in rules['actions'])
-        ]
-        if rule_branch != model_branch or conflicting_actions:
-            # Never persist completed exposure when the evidence says only planned.
-            analysis = {'actions': [a for a in analysis['actions'] if a not in conflicting_actions],
-                        'ambiguous': True}
+    analysis = resolve_analysis(answer, analysis)
+    if analysis is None:
+        response = _response(session, 'analysis_unavailable')
+        response['messages'] = [{'speaker': '진행 안내', 'message': '지금은 답변을 분석할 수 없습니다. 잠시 후 다시 제출해 주세요.'}]
+        return response
     branch, end_contact = decide(analysis)
     session['conversation_history'].append({'speaker': '나', 'message': answer, 'stage': session['current_stage']})
     # Preserve grounded completed exposure even when current intent needs clarification.
@@ -136,21 +126,24 @@ def _submit(session, answer):
 
     session['branch'] = branch
     session['clarification_count'] = 0
-    # Preserve scenario rule weights; raw points never decide branch or ending.
     safe = labels(analysis['actions'], False)
     risky = labels(analysis['actions'], True)
-    score = 0
-    for rule in stage['rules']:
-        keyword = next((word for word in rule['keywords'] if word in answer), None)
-        if keyword is None:
-            continue
-        if rule['type'] == 'risky':
-            if not risky or is_negated(answer, keyword):
+    # Legacy in-progress sessions retain their original rubric. New sessions
+    # receive only a final behavior score; stage scores are not additive.
+    score = None
+    if session.get('scoring_version') != SCORING_VERSION:
+        score = 0
+        for rule in stage['rules']:
+            keyword = next((word for word in rule['keywords'] if word in answer), None)
+            if keyword is None:
                 continue
-        elif not safe:
-            continue
-        score += rule['score']
-    session['total_score'] += score
+            if rule['type'] == 'risky':
+                if not risky or is_negated(answer, keyword):
+                    continue
+            elif not safe:
+                continue
+            score += rule['score']
+        session['total_score'] += score
     session['stage_results'].append({'stage': session['current_stage'], 'answer': answer,
                                      'branch': branch, 'score': score, 'safe_actions': safe,
                                      'risky_actions': risky, 'actions': analysis['actions']})
@@ -183,6 +176,10 @@ def _submit(session, answer):
 def _finish(session, ending):
     session['is_finished'] = True
     session['ending_type'] = ending
+    if session.get('scoring_version') == SCORING_VERSION:
+        report = calculate_score(session['action_history'], ending)
+        session['total_score'] = report['score']
+        session['score_breakdown'] = report['score_breakdown']
     session['messages'] = [{'speaker': 'FinStep 결과 안내', 'message': ENDINGS[ending][2]}]
     _record_messages(session)
     return _response(session, 'finished')
@@ -196,8 +193,14 @@ def get_session_result(session_id):
         raise ValueError('아직 종료되지 않은 시뮬레이션입니다.')
     scenario = find_scenario(session['scenario_id'])
     risk_level, risk_label, summary = ENDINGS[session['ending_type']]
+    scoring = (calculate_score(session['action_history'], session['ending_type'])
+               if session.get('scoring_version') == SCORING_VERSION else {
+                   'scoring_version': 'legacy-v0', 'score_breakdown': None,
+                   'score': None if risk_level == 'unknown' else clamp_score(session['total_score']),
+               })
     return {
-        **_response(session, 'finished'), 'score': None if risk_level == 'unknown' else session['total_score'],
+        **_response(session, 'finished'),
+        **scoring,
         'risk_level': risk_level, 'risk_label': risk_label, 'summary': summary,
         'stage_results': deepcopy(session['stage_results']),
         'action_history': deepcopy(session['action_history']),

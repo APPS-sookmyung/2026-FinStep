@@ -1,15 +1,19 @@
 import { useEffect, useRef, useState } from 'react'
+import { ArrowLeft, ArrowRight, Bookmark, CalendarDays, ChevronLeft, ChevronRight, FolderOpen, RefreshCw } from 'lucide-react'
 import { apiJson } from './api'
-import ConversationHistory from './ConversationHistory'
+import DiagnosisReport, { ScoreValue } from './DiagnosisReport'
+import type { DiagnosisReport as Report, RiskLevel } from './diagnosis'
 import { useAuth } from './auth-context'
 
-type SavedSummary = { id: string; scenario_title: string; risk_label: string; risk_level: 'low' | 'medium' | 'high' | 'unknown'; created_at: number }
-type SavedDetail = SavedSummary & { result: {
-  summary: string; completed_stage_count: number; total_stages: number
-  safe_actions: string[]; risky_actions: string[]; recommended_actions: string[]
-  conversation_history: { stage: number; speaker: string; message: string }[]
-} }
-const dateText = (stamp: number) => new Date(stamp * 1000).toLocaleString('ko-KR')
+type SavedSummary = {
+  id: string; scenario_title: string; risk_label: string; risk_level: RiskLevel; created_at: number
+  score?: number | null; scoring_version?: string
+}
+type SavedDetail = SavedSummary & { result: Report }
+const dateText = (stamp: number) => new Date(stamp * 1000).toLocaleString('ko-KR', {
+  year: 'numeric', month: 'long', day: 'numeric', hour: '2-digit', minute: '2-digit',
+})
+const PAGE_SIZE = 12
 
 function UserArchive() {
   const [items, setItems] = useState<SavedSummary[]>([])
@@ -20,11 +24,16 @@ function UserArchive() {
   const [error, setError] = useState('')
   const [detail, setDetail] = useState<SavedDetail | null>(null)
   const [detailLoading, setDetailLoading] = useState(false)
+  const [detailError, setDetailError] = useState('')
+  const [selectedId, setSelectedId] = useState<string | null>(null)
   const detailRequest = useRef<AbortController | null>(null)
+  const detailHeading = useRef<HTMLHeadingElement>(null)
+  const lastItem = useRef<string | null>(null)
+  const listRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
     const controller = new AbortController()
-    apiJson<{ items: SavedSummary[]; has_more: boolean }>(`/api/results?limit=20&offset=${offset}`, { signal: controller.signal })
+    apiJson<{ items: SavedSummary[]; has_more: boolean }>(`/api/results?limit=${PAGE_SIZE}&offset=${offset}`, { signal: controller.signal })
       .then(data => {
         if (controller.signal.aborted) return
         setItems(data.items); setHasMore(data.has_more); setError('')
@@ -33,72 +42,72 @@ function UserArchive() {
       .finally(() => { if (!controller.signal.aborted) setLoading(false) })
     return () => controller.abort()
   }, [offset, retry])
-
   useEffect(() => () => detailRequest.current?.abort(), [])
+  useEffect(() => {
+    if (detail) detailHeading.current?.focus()
+  }, [detail])
 
   const showDetail = async (id: string) => {
     detailRequest.current?.abort()
     const controller = new AbortController()
     detailRequest.current = controller
-    setDetailLoading(true); setError('')
+    setSelectedId(id); setDetailLoading(true); setDetailError(''); setDetail(null)
     try {
       const data = await apiJson<SavedDetail>(`/api/results/${encodeURIComponent(id)}`, { signal: controller.signal })
       if (!controller.signal.aborted) setDetail(data)
     } catch (e) {
-      if (!controller.signal.aborted) setError(e instanceof Error ? e.message : '결과를 불러오지 못했습니다.')
+      if (!controller.signal.aborted) setDetailError(e instanceof Error ? e.message : '결과를 불러오지 못했습니다.')
     } finally { if (!controller.signal.aborted) setDetailLoading(false) }
   }
+  const backToList = () => {
+    detailRequest.current?.abort()
+    setSelectedId(null); setDetail(null); setDetailError(''); setDetailLoading(false)
+    requestAnimationFrame(() => {
+      const button = Array.from(listRef.current?.querySelectorAll<HTMLButtonElement>('button') ?? [])
+        .find(item => item.dataset.resultId === lastItem.current)
+      button?.focus()
+    })
+  }
 
-  if (detail) return (
-    <section className={`saved-detail archive-risk-${detail.risk_level}`}>
-      <button type="button" className="account-button" onClick={() => { setDetail(null); setError('') }}>보관함 목록으로</button>
-      <h2>{detail.scenario_title} · {detail.risk_label}</h2>
-      <p>저장 일시: {dateText(detail.created_at)}</p>
-      <p>{detail.result.summary}</p>
-      <p>응답 완료 단계: {detail.result.completed_stage_count} / {detail.result.total_stages}</p>
-      <div className="archive-detail-grid">
-        <section><h3>안전 행동</h3>{detail.result.safe_actions.length ? <ul>{detail.result.safe_actions.map((a, i) => <li key={i}>{a}</li>)}</ul> : <p>확인된 안전 행동이 없습니다.</p>}</section>
-        <section><h3>위험 행동</h3>{detail.result.risky_actions.length ? <ul>{detail.result.risky_actions.map((a, i) => <li key={i}>{a}</li>)}</ul> : <p>확인된 위험 행동이 없습니다.</p>}</section>
-      </div>
-      <h3>안전한 대응 방법</h3>
-      <ul>{detail.result.recommended_actions.map((a, i) => <li key={i}>{a}</li>)}</ul>
-      <details>
-        <summary>진단 당시 대화 기록 보기</summary>
-        <section className="conversation-card archive-conversation-card">
-          <ConversationHistory entries={detail.result.conversation_history.map(entry => ({ ...entry, isUser: entry.speaker === '나' }))} />
-        </section>
-      </details>
-    </section>
-  )
+  if (selectedId) return <section className="archive-detail-view" aria-busy={detailLoading}>
+    <button type="button" className="back-button" onClick={backToList}><ArrowLeft size={17} /> 보관함 목록으로</button>
+    {detailLoading && <div className="archive-state" role="status"><RefreshCw size={26} /><h2>저장한 대응을 불러오고 있어요</h2><p>점수와 당시 대화 기록을 준비하고 있어요.</p></div>}
+    {detailError && <div className="archive-state" role="alert"><h2>결과를 불러오지 못했어요</h2><p>{detailError}</p><button className="secondary-button" onClick={() => { void showDetail(selectedId) }}><RefreshCw size={16} /> 이 결과 다시 불러오기</button></div>}
+    {detail && <>
+      <div className="archive-detail-heading"><div><span className="report-eyebrow">저장한 대응 돌아보기</span><h2 ref={detailHeading} tabIndex={-1}>{detail.scenario_title} 결과 리포트</h2></div><time dateTime={new Date(detail.created_at * 1000).toISOString()}><CalendarDays size={16} /> {dateText(detail.created_at)} 저장</time></div>
+      <DiagnosisReport report={detail.result} />
+      <div className="archive-detail-footer"><p>저장 당시의 결과예요. 이후 채점 기준이 바뀌어도 이 기록은 유지돼요.</p><button className="secondary-button" onClick={backToList}>다른 기록 살펴보기 <ArrowRight size={16} /></button></div>
+    </>}
+  </section>
 
-  return (
-    <section aria-label="저장된 진단 목록">
-      {(loading || detailLoading) && <p role="status">결과를 불러오는 중…</p>}
-      {error && <div role="alert"><p className="form-error">{error}</p><button type="button" className="account-button" onClick={() => { setLoading(true); setRetry(retry + 1) }}>목록 다시 불러오기</button></div>}
-      {!loading && !error && items.length === 0 && <div className="archive-empty">저장된 진단이 없습니다. 시뮬레이션을 마치고 ‘보관함에 저장’을 눌러보세요.</div>}
-      {!loading && <div className="archive-list">{items.map(item => (
-        <button type="button" className={`archive-item archive-risk-${item.risk_level}`} key={item.id} disabled={detailLoading} onClick={() => { void showDetail(item.id) }}>
-          <strong>{item.scenario_title}</strong><span>{item.risk_label}</span><time dateTime={new Date(item.created_at * 1000).toISOString()}>{dateText(item.created_at)}</time><span>결과 보기 →</span>
-        </button>
-      ))}</div>}
-      <div className="archive-pagination">
-        <button type="button" className="account-button" disabled={offset === 0 || loading || detailLoading} onClick={() => { setLoading(true); setOffset(offset - 20) }}>이전</button>
-        <span>{offset / 20 + 1}페이지</span>
-        <button type="button" className="account-button" disabled={!hasMore || loading || detailLoading} onClick={() => { setLoading(true); setOffset(offset + 20) }}>다음</button>
-      </div>
-    </section>
-  )
+  return <section className="archive-collection" aria-label="저장된 진단 목록" aria-busy={loading}>
+    <div className="archive-collection-heading"><h2><Bookmark size={19} /> 저장한 리포트</h2><span>최근 저장 순{!loading && !error ? ` · 이 페이지 ${items.length}개` : ''}</span></div>
+    {loading && <div className="archive-state" role="status"><RefreshCw size={26} /><h2>나의 대응 기록을 불러오고 있어요</h2><p>잠시만 기다려 주세요.</p></div>}
+    {error && <div className="archive-state" role="alert"><h2>보관함을 불러오지 못했어요</h2><p>{error}</p><button className="secondary-button" onClick={() => { setError(''); setLoading(true); setRetry(retry + 1) }}><RefreshCw size={16} /> 다시 불러오기</button></div>}
+    {!loading && !error && items.length === 0 && <div className="archive-state"><FolderOpen size={40} /><h2>{offset ? '이 페이지에 저장된 기록이 없어요' : '아직 저장한 리포트가 없어요'}</h2><p>시뮬레이션을 마친 뒤 ‘보관함에 저장’을 누르면<br />점수와 나의 대응 과정을 여기에서 다시 볼 수 있어요.</p></div>}
+    {!loading && !error && <div className="archive-list report-archive-list" ref={listRef}>{items.map(item => (
+      <button type="button" className={`archive-report-card tone-${item.risk_level}`} key={item.id} data-result-id={item.id} onClick={() => { lastItem.current = item.id; void showDetail(item.id) }}>
+        <div className="archive-card-top"><span className="archive-scenario-label">금융 위험 시뮬레이션</span><Bookmark size={19} aria-hidden="true" /></div>
+        <h3>{item.scenario_title}</h3>
+        <span className="outcome-badge">{item.risk_label}</span>
+        <div className="archive-card-score"><ScoreValue report={item} /><span>{item.scoring_version === 'behavior-v1' ? item.score == null ? '판단 자료 부족' : '대응 점수' : '저장 당시의 채점 결과'}</span></div>
+        <div className="archive-card-bottom"><time dateTime={new Date(item.created_at * 1000).toISOString()}>{dateText(item.created_at)}</time><span>리포트 보기 <ArrowRight size={16} /></span></div>
+      </button>
+    ))}</div>}
+    {!error && (items.length > 0 || offset > 0) && <nav className="archive-pagination" aria-label="보관함 페이지">
+      <button type="button" className="account-button" disabled={offset === 0 || loading} onClick={() => { setLoading(true); setOffset(offset - PAGE_SIZE) }}><ChevronLeft size={16} /> 이전</button>
+      <span aria-current="page">{offset / PAGE_SIZE + 1}페이지</span>
+      <button type="button" className="account-button" disabled={!hasMore || loading} onClick={() => { setLoading(true); setOffset(offset + PAGE_SIZE) }}>다음 <ChevronRight size={16} /></button>
+    </nav>}
+  </section>
 }
 
 export default function ArchivePage() {
   const auth = useAuth()
-  return (
-    <main className="archive-main">
-      <h1>진단 결과 보관함</h1>
-      <p>내가 저장한 진단 결과를 다시 확인해 보세요.</p>
-      {auth.loading ? <p role="status">로그인 상태를 확인하고 있어요.</p> : auth.user ? <UserArchive key={auth.user.id} /> : (
-        <section className="archive-empty"><p>내 진단 결과를 보려면 로그인해 주세요.</p><button type="button" className="primary-button" onClick={auth.openLogin}>구글 로그인</button></section>
-      )}
-    </main>
-  )
+  return <main className="archive-main report-archive-main">
+    <header className="archive-page-heading"><span className="report-eyebrow">나의 금융 대응 기록</span><h1>진단 결과 보관함</h1><p>그때의 선택을 돌아보고,<br className="archive-mobile-break" /> 다음 대응을 더 단단하게 준비해 보세요.</p></header>
+    {auth.loading ? <div className="archive-state" role="status">로그인 상태를 확인하고 있어요.</div> : auth.user ? <UserArchive key={auth.user.id} /> : (
+      <section className="archive-state"><FolderOpen size={40} /><h2>나의 대응 기록을 한곳에</h2><p>로그인하면 저장해 둔 점수와 행동별 근거,<br />대화 기록을 다시 확인할 수 있어요.</p><button type="button" className="primary-button" onClick={auth.openLogin}>로그인하고 보관함 보기 <ArrowRight size={17} /></button></section>
+    )}
+  </main>
 }

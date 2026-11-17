@@ -19,9 +19,12 @@ class SaveResult(BaseModel):
 
 
 def summary(row):
+    report = json.loads(row.snapshot)
     return {'id': row.id, 'scenario_title': row.scenario_title,
             'risk_label': row.risk_label, 'created_at': row.created_at,
-            'risk_level': json.loads(row.snapshot).get('risk_level', 'unknown')}
+            'risk_level': report.get('risk_level', 'unknown'),
+            'score': report.get('score'),
+            'scoring_version': report.get('scoring_version', 'legacy-v0')}
 
 
 @router.post('', dependencies=[Depends(trusted_write)])

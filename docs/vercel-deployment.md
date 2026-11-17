@@ -14,7 +14,7 @@
 
 1. Neon Free 프로젝트를 생성하고 Connect에서 pooling이 켜진 PostgreSQL 연결 문자열을 복사한다. `sslmode=require`를 유지한다.
 2. Vercel에서 GitHub 저장소 `binsm24/2026-FinStep`을 가져온다. 배포 변경이 포함된 브랜치를 선택한다.
-3. 아래 환경 변수를 설정한다. DB 비밀번호와 Gemini 키는 Git 저장소에 넣지 않는다.
+3. 아래 환경 변수를 설정한다. DB 비밀번호와 학교 API 키는 Git 저장소에 넣지 않는다.
 4. 배포가 Ready가 되면 `/health`, `/api/auth/me`, 학습 화면, 시뮬레이션을 확인한다.
 5. Google Cloud OAuth 웹 클라이언트의 승인된 JavaScript 원본에 실제 운영 HTTPS 주소를 추가한다. 리디렉션 URI와 client secret은 현재 로그인 방식에 필요하지 않다.
 6. 실제 Google 계정으로 로그인하고 결과 저장·보관함·로그아웃을 확인한다.
@@ -24,8 +24,10 @@
 | `DATABASE_URL` | Neon pooled 연결 문자열 |
 | `COOKIE_SECURE` | `true` |
 | `FRONTEND_ORIGINS` | 실제 운영 원본 `https://프로젝트.vercel.app`; 커스텀 도메인은 쉼표로 추가 |
-| `GEMINI_API_KEY` | Gemini API 키 |
-| `GEMINI_MODEL` | 계정에서 사용 가능한 모델, 예: `gemini-2.5-flash` |
+| `LLM_PROVIDER` | `gateway` |
+| `BAZE_API_KEY` | 학교 개발자 페이지에서 발급받은 키 |
+| `BAZE_BASE_URL` | `https://factchat-cloud.mindlogic.ai/v1/gateway` |
+| `BAZE_MODEL` | `gemini-3.8-flash`; 계정의 모델 목록에서 권한 확인 |
 | `GOOGLE_CLIENT_ID` | Google OAuth 웹 클라이언트 공개 ID |
 
 `VERCEL_URL`과 `VERCEL_PROJECT_PRODUCTION_URL`은 서버에서 신뢰할 원본으로 자동 추가한다.
@@ -44,6 +46,7 @@ node --test tests/quiz.test.mjs
 ```
 
 `backend/test_gemini.py`는 직접 실행할 때만 실제 Gemini API를 호출한다.
+학교 Gateway는 `backend/check_gateway.py --list-models`와 `backend/check_gateway.py`로 확인한다. 상세 설정은 [학교 Gateway 안내](school-gateway.md)를 참고한다. 환경변수 변경 후 재배포해야 적용된다.
 일반 테스트는 외부 API 없이 격리된 SQLite를 사용하며 실제 Neon 연결 및 Vercel 실행은 배포 후 별도로 확인한다.
 
 ## 운영 범위

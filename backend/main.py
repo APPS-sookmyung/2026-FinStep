@@ -16,6 +16,7 @@ from routers.multi_stage import router as multi_stage_router
 from routers.learning import router as learning_router
 from routers.auth import router as auth_router
 from routers.results import router as results_router
+from services import llm_service
 
 load_dotenv()
 
@@ -75,12 +76,10 @@ def health_check():
 @app.get("/health/llm")
 def llm_health_check():
     return {
-        "configured": bool(os.getenv("GEMINI_API_KEY")),
-        "provider": "gemini",
-        "model": os.getenv(
-            "GEMINI_MODEL",
-            "gemini-3.5-flash",
-        ),
+        "configured": llm_service.is_configured(),
+        "provider": llm_service.provider,
+        "model": (llm_service.gateway_model if llm_service.provider == 'gateway'
+                  else llm_service.model),
     }
 
 

@@ -21,3 +21,8 @@ backend/storage/
 .vscode/
 .idea/
 .vercel/
+
+# Local artifacts and temporary files
+/.build/
+/tmp/
+/output/

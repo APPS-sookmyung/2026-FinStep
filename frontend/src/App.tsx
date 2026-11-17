@@ -18,6 +18,8 @@ import { ArchiveNavigation } from './navigation-context'
 import AccountControls from './AccountControls'
 import ArchivePage from './ArchivePage'
 import SaveResultButton from './SaveResultButton'
+import DiagnosisReport from './DiagnosisReport'
+import type { DiagnosisReport as DiagnosisReportData } from './diagnosis'
 import QuizCard from './QuizCard'
 import ConversationHistory, { type ConversationEntry } from './ConversationHistory'
 import type { Quiz } from './quiz'
@@ -73,7 +75,7 @@ type MultiStageResponse = {
   stage_title: string
   description?: string
   messages?: SimulationMessage[]
-  total_score: number
+  total_score: number | null
   safe_actions: string[]
   risky_actions: string[]
   total_stages?: number
@@ -81,7 +83,7 @@ type MultiStageResponse = {
   recommended_actions?: string[]
 }
 
-type MultiStageResult = {
+type MultiStageResult = DiagnosisReportData & {
   session_id: string
   scenario_id: string
   scenario_title: string
@@ -94,7 +96,7 @@ type MultiStageResult = {
   stage_results: {
     stage: number
     answer: string
-    score: number
+    score: number | null
     safe_actions: string[]
     risky_actions: string[]
   }[]
@@ -1115,20 +1117,6 @@ function MultiStageResultPage({
   onLearn: (contentId: string) => void
 }) {
   const auth = useAuth()
-  const resultClass =
-    result.risk_level === 'low'
-      ? 'result-low'
-      : result.risk_level === 'medium' || result.risk_level === 'unknown'
-        ? 'result-medium'
-        : 'result-high'
-
-  const resultIcon =
-    result.risk_level === 'low'
-      ? '✓'
-      : result.risk_level === 'medium' || result.risk_level === 'unknown'
-        ? '!'
-        : '×'
-
   return (
     <div className="app-shell">
       <Header onLogoClick={onHome} />
@@ -1136,7 +1124,7 @@ function MultiStageResultPage({
       <main className="result-main">
         <StepProgress currentStep={3} />
 
-        <section className="result-heading">
+        <section className="result-heading result-report-heading">
           <span className="section-label">SIMULATION COMPLETE</span>
           <h1>
             {scenario.title} 시뮬레이션
@@ -1145,85 +1133,7 @@ function MultiStageResultPage({
           </h1>
         </section>
 
-        <section className={`result-summary ${resultClass}`}>
-          <div className="result-symbol">{resultIcon}</div>
-
-          <div className="result-summary-content">
-            <span>금융 위험 대응 수준</span>
-            <h2>{result.risk_label}</h2>
-            <p>{result.summary}</p>
-          </div>
-
-          <div className="result-score">
-            <span>응답 완료 단계</span>
-            <strong>{result.completed_stage_count} / {result.total_stages}</strong>
-          </div>
-        </section>
-
-        <section className="result-grid">
-          <article className="result-card">
-            <div className="result-card-title">
-              <h2>안전 행동</h2>
-              <span>{result.safe_actions.length}</span>
-            </div>
-
-            {result.safe_actions.length > 0 ? (
-              <ul className="action-list">
-                {result.safe_actions.map((action) => (
-                  <li key={action}>
-                    <span>✓</span>
-                    {action}
-                  </li>
-                ))}
-              </ul>
-            ) : (
-              <p className="empty-message">
-                확인된 안전 행동이 없습니다.
-              </p>
-            )}
-          </article>
-
-          <article className="result-card">
-            <div className="result-card-title">
-              <h2>위험 행동</h2>
-              <span>{result.risky_actions.length}</span>
-            </div>
-
-            {result.risky_actions.length > 0 ? (
-              <ul className="action-list">
-                {result.risky_actions.map((action) => (
-                  <li key={action}>
-                    <span>!</span>
-                    {action}
-                  </li>
-                ))}
-              </ul>
-            ) : (
-              <p className="empty-message">
-                확인된 위험 행동이 없습니다.
-              </p>
-            )}
-          </article>
-        </section>
-
-        <section className="recommendation-card">
-          <div className="recommendation-heading">
-            <ShieldCheck size={22} />
-            <div>
-              <span className="section-label">SAFER RESPONSE</span>
-              <h2>안전한 대응 방법</h2>
-            </div>
-          </div>
-
-          <ul>
-            {result.recommended_actions.map((action, index) => (
-              <li key={action}>
-                <span>{index + 1}</span>
-                {action}
-              </li>
-            ))}
-          </ul>
-        </section>
+        <DiagnosisReport report={result} />
 
         <section className="related-learning-card">
           <div className="recommendation-heading">
