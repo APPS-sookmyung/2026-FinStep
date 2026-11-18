@@ -28,8 +28,8 @@ def rule_analysis(answer):
     actions = []
     patterns = {
         "transfer_money": r'(?:송금|입금|이체)(?:은|을)?\s*(?:하지\s*않\w*|안\s*하\w*|거절\w*|했\w*|하\w*|한\w*)|(?:돈을?\s*|소액\w*\s*|먼저\s*|이미\s*|안\s*)?(?:보내지\s*않\w*|보냈\w*|보낸다|보내겠다|보내고)',
-        "provide_personal_info": r'(?:개인정보|인증번호|정보)(?:를|는)?\s*(?:제공하지\s*않\w*|알려주지\s*않\w*|제공했\w*|제공하\w*|제공한\w*|알려줬\w*|알려준다|알려주겠다)',
-        "sign_contract": r'계약(?:은|을)?\s*(?:하지\s*않\w*|안\s*하\w*|했\w*|한다|하겠다|하고)',
+        "provide_personal_info": r'(?:개인정보|생년월일|주민등록번호|비밀번호|인증번호|정보)(?:를|는|을|은)?\s*(?:제공하지\s*않\w*|전달하지\s*않\w*|알려주지\s*않\w*|안\s*(?:전달|제공|알려)\w*|제공했\w*|제공하\w*|제공한\w*|전달했\w*|전달하\w*|전달한\w*|알려줬\w*|알려준다|알려주겠\w*|알려줄게\w*)',
+        "sign_contract": r'계약(?:은|을)?\s*(?:하지\s*않\w*|안\s*하\w*|했\w*|한다|하겠\w*|합시다|할게\w*|하죠|하고|진행하겠\w*|진행합시다)',
         "invest_money": r'투자(?:는|를)?\s*(?:하지\s*않\w*|안\s*하\w*|했\w*|한다|하겠다|하고)',
         "trust_and_follow": r'(?:알려주는|말한|시키는)\s*대로\s*(?:진행|따르)\w*',
         "end_contact": r'(?:전화|통화|대화|연락)(?:를|을)?\s*(?:끊지\s*않\w*|끝내지\s*않\w*|종료하지\s*않\w*|끊\w*|끝낸\w*|끝내\w*|종료\w*)|차단(?:한다|하겠다)|거래(?:를)?\s*철회(?:한다|하겠다)',
@@ -82,6 +82,11 @@ def resolve_analysis(answer, model_analysis):
         return model_analysis
     rule_branch, _ = decide(rules)
     model_branch, _ = decide(model_analysis)
+    # Explicit contract or personal-information commitments must not turn into an endless clarification
+    # loop when the model omits the action entirely.
+    if (not model_analysis['actions'] and rule_branch == 'risky'
+            and any(a['type'] in {'sign_contract', 'provide_personal_info'} for a in rules['actions'])):
+        return rules
     conflicts = [
         action for action in model_analysis['actions']
         if any(rule['type'] == action['type'] and rule['status'] != action['status']

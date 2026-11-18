@@ -1,6 +1,9 @@
 from typing import Literal
 from pydantic import BaseModel, Field
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from sqlalchemy.orm import Session
+from database import get_db
+from services.result_archive import archive_result
 from services.auth_service import optional_user, trusted_write, new_simulation_owner, check_simulation_owner
 from services.llm_service import (
     analyze_answer_with_llm,
@@ -37,7 +40,7 @@ class LLMAnalysisRequest(BaseModel):
 
 class StageAnswerRequest(BaseModel):
     session_id: str = Field(..., min_length=1)
-    answer: str = Field(..., min_length=2, max_length=500)
+    answer: str = Field(..., min_length=1, max_length=500)
     request_id: str | None = Field(default=None, min_length=1, max_length=64)
     expected_stage: int | None = Field(default=None, ge=1, le=4)
 
@@ -54,15 +57,21 @@ def start_simulation(scenario_id: str, request: Request, response: Response, use
 
 
 @router.post("/respond", dependencies=[Depends(trusted_write)])
-def respond_to_stage(request: StageAnswerRequest, http_request: Request, user=Depends(optional_user)):
+def respond_to_stage(request: StageAnswerRequest, http_request: Request, user=Depends(optional_user),
+                     db: Session = Depends(get_db)):
     check_simulation_owner(request.session_id, http_request, user)
     try:
-        return submit_stage_answer(
+        response = submit_stage_answer(
             session_id=request.session_id,
             answer=request.answer,
             request_id=request.request_id,
             expected_stage=request.expected_stage,
+            completed_by=user.id if user else None,
         )
+        if response['is_finished'] and user:
+            saved = archive_result(request.session_id, http_request, user, db)
+            response = {**response, 'saved_result_id': saved.id}
+        return response
     except ValueError as error:
         raise HTTPException(
             status_code=400,

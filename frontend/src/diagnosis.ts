@@ -27,5 +27,5 @@ export type DiagnosisReport = {
   safe_actions: string[]
   risky_actions: string[]
   recommended_actions: string[]
-  conversation_history?: { stage: number; speaker: string; message: string }[]
+  conversation_history?: { stage: number; speaker: string; message: string; kind?: 'situation' }[]
 }
