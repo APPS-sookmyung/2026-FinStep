@@ -17,12 +17,12 @@ import { useAuth } from './auth-context'
 import { ArchiveNavigation } from './navigation-context'
 import AccountControls from './AccountControls'
 import ArchivePage from './ArchivePage'
-import SaveResultButton from './SaveResultButton'
 import DiagnosisReport from './DiagnosisReport'
 import type { DiagnosisReport as DiagnosisReportData } from './diagnosis'
 import QuizCard from './QuizCard'
 import ConversationHistory, { type ConversationEntry } from './ConversationHistory'
 import type { Quiz } from './quiz'
+import './Typography.css'
 
 type Scenario = {
   id: string
@@ -52,10 +52,12 @@ type AnalysisResult = {
 type SimulationMessage = {
   speaker: string
   message: string
+  kind?: 'situation'
 }
 
 type MultiStageStartResponse = {
   question: string
+  answer_placeholder?: string
   session_id: string
   scenario_id: string
   scenario_title: string
@@ -69,7 +71,8 @@ type MultiStageStartResponse = {
 
 type MultiStageResponse = {
   question: string
-  status: 'advanced' | 'clarification' | 'analysis_unavailable' | 'finished'
+  answer_placeholder?: string
+  status: 'advanced' | 'clarification' | 'analysis_unavailable' | 'question_answered' | 'dialogue_continued' | 'finished'
   session_id: string
   stage: number
   stage_title: string
@@ -81,9 +84,11 @@ type MultiStageResponse = {
   total_stages?: number
   is_finished: boolean
   recommended_actions?: string[]
+  saved_result_id?: string
 }
 
 type MultiStageResult = DiagnosisReportData & {
+  saved_result_id?: string
   session_id: string
   scenario_id: string
   scenario_title: string
@@ -397,11 +402,6 @@ function HomePage({
               <span>직접 판단해보세요.</span>
             </h1>
 
-            <p className="hero-description">
-              FinStep는 대학생과 사회초년생이 금융 사기 상황을
-              직접 체험하고, 더 안전한 선택을 연습할 수 있도록 돕습니다.
-            </p>
-
             <div className="hero-actions">
               <button className="primary-button" onClick={onStart}>
                 금융 위험 시뮬레이터 시작
@@ -417,10 +417,6 @@ function HomePage({
               </button>
             </div>
 
-            <div className="hero-note">
-              <BadgeAlert size={16} />
-              실제 생활에서 마주할 수 있는 상황을 바탕으로 구성했어요.
-            </div>
           </div>
 
           <div className="hero-visual">
@@ -909,7 +905,6 @@ function MultiStagePage({
   scenario,
   initialData,
   onComplete,
-  onBack,
   onHome,
 }: {
   scenario: Scenario
@@ -933,13 +928,14 @@ function MultiStagePage({
       stageTitle: initialData.stage_title,
       speaker: item.speaker,
       message: item.message,
+      kind: item.kind,
     })),
   )
 
   const handleSubmit = async () => {
     if (submitting.current) return
-    if (answer.trim().length < 2) {
-      setErrorMessage('현재 상황에 대한 대응을 2자 이상 작성해주세요.')
+    if (answer.trim().length < 1) {
+      setErrorMessage('메시지를 입력해주세요.')
       return
     }
 
@@ -995,7 +991,7 @@ function MultiStagePage({
         const result: MultiStageResult =
           await resultResponse.json()
 
-        onComplete(result)
+        onComplete({ ...result, saved_result_id: data.saved_result_id })
         return
       }
 
@@ -1011,6 +1007,7 @@ function MultiStagePage({
           stageTitle: nextStageTitle,
           speaker: item.speaker,
           message: item.message,
+          kind: item.kind,
         })),
       ])
 
@@ -1020,6 +1017,7 @@ function MultiStagePage({
         stage_title: data.stage_title,
         description: data.description ?? '',
         question: data.question,
+        answer_placeholder: data.answer_placeholder ?? stageData.answer_placeholder,
         messages: data.messages ?? [],
         is_finished: false,
       })
@@ -1042,21 +1040,7 @@ function MultiStagePage({
       <Header onLogoClick={onHome} />
 
       <main className="multi-stage-main">
-        <button className="back-button" onClick={onBack}>
-          <ChevronLeft size={18} />
-          시나리오 선택으로 돌아가기
-        </button>
-
         <StepProgress currentStep={2} />
-
-        <section className="multi-stage-heading">
-          <h1>
-            {scenario.title}
-            <br />
-            <span>{stageData.stage_title}</span>
-          </h1>
-
-        </section>
 
         <section className="conversation-card">
           <div className="conversation-header">
@@ -1071,13 +1055,13 @@ function MultiStagePage({
         <section className="multi-answer-card">
           <h2>{stageData.question}</h2>
           <p>
-            현재 상황에서 본인이 할 행동을 자유롭게 작성해주세요.
+            나의 대응을 작성하거나 상대방에게 궁금한 점을 질문해주세요.
           </p>
 
           <textarea
             value={answer}
             onChange={(event) => setAnswer(event.target.value)}
-            placeholder="예: 전화를 끊고 공식 기관에 직접 확인한다."
+            placeholder={stageData.answer_placeholder ?? scenario.placeholder}
             maxLength={500}
           />
 
@@ -1091,7 +1075,7 @@ function MultiStagePage({
             >
               {isLoading
                 ? '다음 상황을 준비하는 중...'
-                : '답변 제출'}
+                : '메시지 보내기'}
               {!isLoading && <ArrowRight size={18} />}
             </button>
           </div>
@@ -1116,22 +1100,12 @@ function MultiStageResultPage({
   onHome: () => void
   onLearn: (contentId: string) => void
 }) {
-  const auth = useAuth()
   return (
     <div className="app-shell">
       <Header onLogoClick={onHome} />
 
       <main className="result-main">
         <StepProgress currentStep={3} />
-
-        <section className="result-heading result-report-heading">
-          <span className="section-label">SIMULATION COMPLETE</span>
-          <h1>
-            {scenario.title} 시뮬레이션
-            <br />
-            <span>결과 리포트</span>
-          </h1>
-        </section>
 
         <DiagnosisReport report={result} />
 
@@ -1163,7 +1137,6 @@ function MultiStageResultPage({
         </section>
 
 
-        <SaveResultButton key={`${result.session_id}-${auth.user?.id ?? "guest"}`} sessionId={result.session_id} />
 
         <div className="result-actions">
           <button className="primary-button" onClick={onHome}>
@@ -1229,29 +1202,10 @@ function LearningPage({
   )
 
   return (
-    <div className="app-shell">
+    <div className="app-shell learning-shell">
       <Header onLogoClick={onBack} />
 
-      <main className="learning-main">
-        <button className="back-button" onClick={onBack}>
-          <ChevronLeft size={18} />
-          홈으로 돌아가기
-        </button>
-
-        <section className="learning-heading">
-          <h1>
-            경제를 이해하는
-            <br />
-            <span>첫걸음</span>
-          </h1>
-          {!selectedContent && (
-          <p>
-            어려운 경제·금융 지식을 짧고 쉽게 학습해보세요.
-            <br />
-            시뮬레이션에서 만나는 위험 신호도 함께 알아볼 수 있어요.
-          </p>
-          )}
-        </section>
+      <main className={`learning-main learning-compact${selectedContent ? ' learning-detail-view' : ' learning-catalog'}`} aria-label="경제 지식 학습과 퀴즈">
 
         {isLoading && (
           <div className="learning-state">
@@ -1269,7 +1223,6 @@ function LearningPage({
           <LearningDetail
             key={selectedContent.id}
             content={selectedContent}
-            onBack={() => setSelectedContent(null)}
           />
         )}
 
@@ -1342,18 +1295,11 @@ function LearningCategory({
 
 function LearningDetail({
   content,
-  onBack,
 }: {
   content: LearningContent
-  onBack: () => void
 }) {
   return (
     <section className="learning-detail">
-      <button className="back-button" onClick={onBack}>
-        <ChevronLeft size={18} />
-        학습 목록으로 돌아가기
-      </button>
-
       <div className="learning-detail-header">
         <div className="learning-card-icon">
           <BookOpen size={25} />

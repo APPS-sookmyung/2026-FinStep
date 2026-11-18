@@ -16,7 +16,7 @@ from google.auth.exceptions import TransportError
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from database import Diagnosis, LoginChallenge, LoginSession, User, get_engine
+from database import Diagnosis, LoginChallenge, LoginSession, Simulation, User, get_engine
 from main import app
 from services import multi_stage_service as sim
 from services.auth_service import SESSION_COOKIE, CHALLENGE_COOKIE, token_hash
@@ -202,12 +202,15 @@ class AuthResultsTests(unittest.TestCase):
         self.assertEqual(report['ending_type'], 'safe_exit')
         self.assertTrue(report['conversation_history'])
 
-    def test_guest_report_can_be_claimed_only_by_original_browser(self):
+    def test_guest_completion_is_not_archived_after_later_login(self):
         sid = self.finish(self.a)
         self.login(self.b, 'google-user-b')
         self.assertEqual(self.b.post('/api/results', json={'session_id': sid}).status_code, 404)
         self.login(self.a)
-        self.assertEqual(self.a.post('/api/results', json={'session_id': sid}).status_code, 200)
+        self.assertEqual(self.a.post('/api/results', json={'session_id': sid}).status_code, 403)
+        self.assertEqual(self.a.get('/api/results').json()['items'], [])
+        with Session(get_engine()) as db:
+            self.assertIsNone(db.scalar(select(Diagnosis).where(Diagnosis.simulation_id == sid)))
         self.a.post('/api/auth/logout')
         self.assertEqual(self.a.get(f'/api/multi-stage/sessions/{sid}/result').status_code, 404)
 
@@ -215,6 +218,76 @@ class AuthResultsTests(unittest.TestCase):
         self.login(self.a)
         sid = self.a.post('/api/multi-stage/voice-phishing/start').json()['session_id']
         self.assertEqual(self.a.post('/api/results', json={'session_id': sid}).status_code, 409)
+
+    def test_logged_in_completion_is_archived_without_save_request(self):
+        self.login(self.a)
+        sid = self.finish(self.a)
+        items = self.a.get('/api/results').json()['items']
+        self.assertEqual(len(items), 1)
+        report = self.a.get(f"/api/results/{items[0]['id']}").json()['result']
+        self.assertEqual(report['session_id'], sid)
+        self.assertEqual(report['score'], 90)
+        self.assertTrue(report['conversation_history'])
+        # Repeated requests cannot duplicate the automatically archived result.
+        self.a.post('/api/results', json={'session_id': sid})
+        self.a.post('/api/results', json={'session_id': sid})
+        self.assertEqual(len(self.a.get('/api/results').json()['items']), 1)
+
+    def test_completion_retry_does_not_duplicate_automatic_archive(self):
+        self.login(self.a)
+        sid = self.a.post('/api/multi-stage/voice-phishing/start').json()['session_id']
+        body = {'session_id': sid, 'answer': '전화를 끊는다', 'request_id': 'autosave-retry', 'expected_stage': 1}
+        with patch.object(sim, 'analyze_answer_with_llm', return_value={'llm_available': False}):
+            first = self.a.post('/api/multi-stage/respond', json=body)
+            second = self.a.post('/api/multi-stage/respond', json=body)
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(first.json()['saved_result_id'], second.json()['saved_result_id'])
+        self.assertEqual(len(self.a.get('/api/results').json()['items']), 1)
+
+    def test_login_before_completion_archives_guest_started_session(self):
+        sid = self.a.post('/api/multi-stage/voice-phishing/start').json()['session_id']
+        self.login(self.a)
+        with patch.object(sim, 'analyze_answer_with_llm', return_value={'llm_available': False}):
+            finished = self.a.post('/api/multi-stage/respond', json={'session_id': sid, 'answer': '전화를 끊는다'})
+        self.assertEqual(finished.status_code, 200)
+        self.assertTrue(finished.json()['saved_result_id'])
+        self.assertEqual(len(self.a.get('/api/results').json()['items']), 1)
+
+    def test_guest_completion_retry_after_login_cannot_change_archive_eligibility(self):
+        sid = self.a.post('/api/multi-stage/voice-phishing/start').json()['session_id']
+        body = {'session_id': sid, 'answer': '전화를 끊는다', 'request_id': 'guest-completed', 'expected_stage': 1}
+        with patch.object(sim, 'analyze_answer_with_llm', return_value={'llm_available': False}):
+            first = self.a.post('/api/multi-stage/respond', json=body)
+        self.assertEqual(first.status_code, 200)
+        self.assertNotIn('saved_result_id', first.json())
+        self.login(self.a)
+        self.assertEqual(self.a.post('/api/multi-stage/respond', json=body).status_code, 403)
+        self.assertEqual(self.a.get('/api/results').json()['items'], [])
+
+    def test_only_owner_can_delete_and_deleted_result_cannot_be_resaved(self):
+        self.login(self.a)
+        self.login(self.b, 'google-user-b')
+        sid = self.finish(self.a)
+        result_id = self.a.get('/api/results').json()['items'][0]['id']
+        self.assertEqual(self.b.delete(f'/api/results/{result_id}').status_code, 404)
+        self.assertEqual(self.a.get(f'/api/results/{result_id}').status_code, 200)
+        self.assertEqual(self.a.delete(f'/api/results/{result_id}').status_code, 200)
+        self.assertEqual(self.a.get('/api/results').json()['items'], [])
+        self.assertEqual(self.a.get(f'/api/results/{result_id}').status_code, 404)
+        self.assertEqual(self.a.get(f'/api/multi-stage/sessions/{sid}/result').status_code, 404)
+        self.assertEqual(self.a.post('/api/results', json={'session_id': sid}).status_code, 404)
+        with Session(get_engine()) as db:
+            self.assertIsNone(db.get(Simulation, sid))
+            self.assertIsNone(db.get(Diagnosis, result_id))
+
+    def test_delete_requires_login_and_trusted_origin(self):
+        self.login(self.a)
+        self.finish(self.a)
+        result_id = self.a.get('/api/results').json()['items'][0]['id']
+        self.assertEqual(self.b.delete(f'/api/results/{result_id}').status_code, 401)
+        response = self.a.delete(f'/api/results/{result_id}', headers={**HEADERS, 'Origin': 'https://attacker.invalid'})
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(self.a.get(f'/api/results/{result_id}').status_code, 200)
 
     def test_saved_reports_and_login_survive_new_database_connection(self):
         user_id = self.login(self.a).json()['user']['id']

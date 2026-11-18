@@ -1,12 +1,14 @@
+import re
 from copy import deepcopy
 from uuid import uuid4
 
 from data.scenarios import MULTI_STAGE_SCENARIOS
-from data.branches import BRANCHES, ENDINGS, next_dialogue
+from data.branches import BRANCHES, ENDINGS, STAGE_CONTEXTS, next_dialogue
 from services.branch_analysis import RISK_TYPES, decide, labels, resolve_analysis
 from services.llm_service import analyze_answer_with_llm, generate_next_response
 from services.simulator_service import is_negated
 from services.scoring import SCORING_VERSION, calculate_score, clamp_score
+from services.question_dialogue import call_permission_reply, detect_question_topic, offline_question_only, question_reply
 
 from services.session_store import create_session_snapshot, get_session, load_session, save_session
 CLARIFICATION = '이 상황에서 실제로 어떻게 행동할지 적어주세요. 돈이나 정보를 제공할지, 확인하거나 대화를 중단할지 구체적으로 알려주세요.'
@@ -29,8 +31,9 @@ def create_session(scenario_id, owner=None):
         'total_score': None, 'stage_results': [], 'action_history': [],
         'conversation_history': [], 'clarification_count': 0,
         'branch': None, 'ending_type': None, 'is_finished': False,
-        'description': data['questions'][0], 'question': data['questions'][0],
-        'messages': [{'speaker': data['speaker'], 'message': data['opening']}],
+        'description': STAGE_CONTEXTS[scenario_id][0], 'question': data['questions'][0],
+        'messages': [{'speaker': data['speaker'], 'message': data['opening']},
+                     {'speaker': '상황', 'message': STAGE_CONTEXTS[scenario_id][0], 'kind': 'situation'}],
         'request_cache': {},
     }
     _record_messages(session)
@@ -52,6 +55,7 @@ def _response(session, status='advanced'):
         'scenario_title': scenario['title'], 'stage': stage['stage'],
         'stage_title': stage['title'], 'description': session['description'],
         'question': session['question'], 'messages': deepcopy(session['messages']),
+        'answer_placeholder': BRANCHES[scenario['id']]['placeholder'],
         'total_stages': scenario['total_stages'],
         'total_score': (session['total_score'] if session.get('scoring_version') == SCORING_VERSION
                         else clamp_score(session['total_score']) if session['is_finished']
@@ -65,7 +69,7 @@ def _response(session, status='advanced'):
     }
 
 
-def submit_stage_answer(session_id, answer, request_id=None, expected_stage=None):
+def submit_stage_answer(session_id, answer, request_id=None, expected_stage=None, completed_by=None):
     session, version = load_session(session_id)
     if session is None:
         raise ValueError('존재하지 않는 시뮬레이션 세션입니다.')
@@ -79,9 +83,9 @@ def submit_stage_answer(session_id, answer, request_id=None, expected_stage=None
         raise ValueError('이미 종료된 시뮬레이션입니다.')
     if expected_stage is not None and expected_stage != session['current_stage']:
         raise ValueError('현재 단계와 요청 단계가 다릅니다.')
-    if not 2 <= len(answer) <= 500:
-        raise ValueError('답변은 2~500자로 작성해 주세요.')
-    response = _submit(session, answer)
+    if not 1 <= len(answer) <= 500:
+        raise ValueError('답변은 1~500자로 작성해 주세요.')
+    response = _submit(session, answer, completed_by)
     if response['status'] == 'analysis_unavailable':
         return response
     if request_id:
@@ -95,15 +99,30 @@ def submit_stage_answer(session_id, answer, request_id=None, expected_stage=None
     return response
 
 
-def _submit(session, answer):
+def _submit(session, answer, completed_by=None):
     scenario = find_scenario(session['scenario_id'])
     stage = scenario['stages'][session['current_stage'] - 1]
-    analysis = analyze_answer_with_llm(
+    last_message = next((m['message'] for m in reversed(session['conversation_history'])
+                         if m['speaker'] not in {'나', '진행 안내', '상황'}), '')
+    reply = call_permission_reply(scenario['id'], last_message, answer)
+    if reply:
+        session['conversation_history'].append({'speaker': '나', 'message': answer,
+                                                'stage': session['current_stage']})
+        session['messages'] = [{'speaker': BRANCHES[scenario['id']]['speaker'], 'message': reply}]
+        _record_messages(session)
+        return _response(session, 'dialogue_continued')
+    model_analysis = analyze_answer_with_llm(
         scenario_title=scenario['title'], stage_title=stage['title'],
         situation=session['description'], answer=answer,
         conversation_history=session['conversation_history'],
     )
-    analysis = resolve_analysis(answer, analysis)
+    detected_topic = detect_question_topic(answer)
+    topic = (model_analysis.get('question_topic') or detected_topic) if detected_topic else None
+    analysis = resolve_analysis(answer, model_analysis)
+    if model_analysis['llm_available'] and analysis is not model_analysis:
+        topic = None  # A model/rule conflict still requires clarification.
+    if analysis is None and topic and offline_question_only(answer):
+        analysis = {'actions': [], 'ambiguous': True}
     if analysis is None:
         response = _response(session, 'analysis_unavailable')
         response['messages'] = [{'speaker': '진행 안내', 'message': '지금은 답변을 분석할 수 없습니다. 잠시 후 다시 제출해 주세요.'}]
@@ -117,8 +136,21 @@ def _submit(session, answer):
             if record not in session['action_history']:
                 session['action_history'].append(record)
     if branch == 'unclear':
+        # Questions are dialogue turns, not unanswered assessment attempts.
+        # Keep any already grounded past exposure but never invent a decision.
+        if topic and not any(not a.get('historical', False) and a['status'] != 'negated'
+                             for a in analysis['actions']):
+            session['messages'] = [
+                {'speaker': BRANCHES[scenario['id']]['speaker'],
+                 'message': question_reply(scenario['id'], session['current_stage'], topic,
+                                           session['action_history'])},
+                {'speaker': '상황', 'kind': 'situation',
+                 'message': session['description'] + ' 상대방의 답변을 들었습니다. 같은 상황에서 질문을 더 하거나 행동을 결정할 수 있습니다.'},
+            ]
+            _record_messages(session)
+            return _response(session, 'question_answered')
         if session['clarification_count'] >= 2:
-            return _finish(session, 'insufficient_information')
+            return _finish(session, 'insufficient_information', completed_by)
         session['clarification_count'] += 1
         session['messages'] = [{'speaker': '진행 안내', 'message': CLARIFICATION}]
         _record_messages(session)
@@ -148,15 +180,28 @@ def _submit(session, answer):
                                      'branch': branch, 'score': score, 'safe_actions': safe,
                                      'risky_actions': risky, 'actions': analysis['actions']})
     exposure = any(a['type'] in RISK_TYPES and a['status'] == 'completed' for a in session['action_history'])
-    if end_contact or session['current_stage'] >= scenario['total_stages']:
+    committed_risk = branch == 'risky' and any(
+        a['type'] in {'sign_contract', 'provide_personal_info'}
+        and a['status'] in {'planned', 'completed'} and not a.get('historical', False)
+        for a in analysis['actions']
+    )
+    # A definite refusal of the transaction is a terminal choice, unlike a delay.
+    transaction_refused = branch == 'safe' and any(
+        a['type'] in {'sign_contract', 'invest_money'} and a['status'] == 'negated'
+        and not a.get('historical', False) for a in analysis['actions']
+    ) and not re.search(r'확인.{0,12}전|때까지|보류|오늘은|지금은|나중', answer)
+    if end_contact or transaction_refused or committed_risk or session['current_stage'] >= scenario['total_stages']:
         ending = ('risk_continues' if branch == 'risky' else 'recovery' if exposure
-                  else 'safe_exit' if end_contact else 'safe_hold')
-        return _finish(session, ending)
+                  else 'safe_exit' if end_contact or transaction_refused else 'safe_hold')
+        return _finish(session, ending, completed_by)
 
     next_stage = session['current_stage'] + 1
     dialogue = next_dialogue(scenario['id'], next_stage, branch, session['action_history'])
+    if topic:
+        dialogue['message'] = question_reply(scenario['id'], session['current_stage'], topic,
+                                            session['action_history']) + ' ' + dialogue['message']
     actual_message = next((m['message'] for m in reversed(session['conversation_history'])
-                           if m['speaker'] not in {'나', '진행 안내'}), '')
+                           if m['speaker'] not in {'나', '진행 안내', '상황'}), '')
     generated = generate_next_response(
         scenario_title=scenario['title'], current_stage_title=stage['title'],
         current_message=actual_message, user_answer=answer,
@@ -164,18 +209,21 @@ def _submit(session, answer):
         next_stage_description=dialogue['description'], next_stage_message=dialogue['message'],
         branch=branch, conversation_history=session['conversation_history'],
         action_history=session['action_history'],
+        next_question=dialogue['question'],
     )
     session['current_stage'] = next_stage
     session['description'] = dialogue['description']
     session['question'] = dialogue['question']
-    session['messages'] = [{'speaker': dialogue['speaker'], 'message': generated['message']}]
+    session['messages'] = [{'speaker': dialogue['speaker'], 'message': generated['message']},
+                           {'speaker': '상황', 'message': dialogue['description'], 'kind': 'situation'}]
     _record_messages(session)
     return _response(session)
 
 
-def _finish(session, ending):
+def _finish(session, ending, completed_by=None):
     session['is_finished'] = True
     session['ending_type'] = ending
+    session['completion_user_id'] = completed_by
     if session.get('scoring_version') == SCORING_VERSION:
         report = calculate_score(session['action_history'], ending)
         session['total_score'] = report['score']

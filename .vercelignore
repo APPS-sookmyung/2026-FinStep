@@ -11,6 +11,9 @@
 frontend/dist
 docs
 backend/test_*.py
+backend/check_gateway.py
+backend/check_conversation.py
+backend/evaluate_gateway.py
 frontend/tests
 .build/
 tmp/

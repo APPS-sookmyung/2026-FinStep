@@ -56,12 +56,17 @@ class GatewayTests(unittest.TestCase):
             self.assertFalse(self.analyze()['llm_available'])
             post.assert_not_called()
 
-    def test_dialogue_cannot_invent_text(self):
-        for content in ['{"choice":1}', '{"choice":true}', '{"choice":99}', '{"message":"송금 완료"}']:
+    def test_contextual_dialogue_and_invalid_claim_fallback(self):
+        for content, accepted in [
+            ('{"message":"오늘 결정하기 어려우시면 언제쯤 가능하세요?"}', True),
+            ('{"message":"송금이 완료됐습니다"}', False),
+            ('{"choice":1}', False),
+            ('{"message":""}', False),
+        ]:
             with patch.object(llm.httpx, 'post', return_value=self.response(content)):
-                result = llm.generate_next_response('제목', '현재', '대사', '답변', '다음', '상황', '확인하세요.')
-            self.assertIn(result['message'], ['확인하세요.', '알겠습니다. 확인하세요.'])
-            self.assertEqual(result['llm_available'], content == '{"choice":1}')
+                result = llm.generate_next_response('제목', '현재', '대사', '오늘은 어려워요', '다음', '상황', '확인하세요.')
+            self.assertEqual(result['llm_available'], accepted)
+            self.assertEqual(result['message'], '오늘 결정하기 어려우시면 언제쯤 가능하세요?' if accepted else '확인하세요.')
 
     def test_reject_unsafe_base_url(self):
         for url in ['http://example.com', 'https://key@example.com', 'https://example.com?key=x']:
